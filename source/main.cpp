@@ -14,8 +14,8 @@
 #define G0 1.65f
 #define NSAMP 10
  
-char ssid[] = "orangejuzz";
-char pass[] = "Beetroot18";
+char ssid[] = "";
+char pass[] = "";
 
 /* Private variables ------------------------------------------------------- */
 static bool debug_nn = false; // Set this to true to see e.g. features generated from the raw signal
