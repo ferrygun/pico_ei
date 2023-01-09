@@ -1,84 +1,129 @@
-#include "edge-impulse-sdk/classifier/ei_run_classifier.h"
-
-#include <hardware/gpio.h>
-#include <hardware/uart.h>
-#include <pico/stdio_usb.h>
+/* Includes ---------------------------------------------------------------- */
 #include <stdio.h>
+#include "pico/stdlib.h"
+#include "ei_run_classifier.h"
+#include "hardware/gpio.h"
+#include "hardware/adc.h"
+#include "pico/cyw43_arch.h"
 
-const uint LED_PIN = 25;
+#define FREQUENCY_HZ        50
+#define INTERVAL_MS         (1000 / (FREQUENCY_HZ + 1))
 
-static const float features[] = {
-    // copy raw features here (for example from the 'Live classification' page)
+/* Constant defines -------------------------------------------------------- */
+#define CONVERT_G_TO_MS2    9.80665f
+#define G0 1.65f
+#define NSAMP 10
+ 
+char ssid[] = "orangejuzz";
+char pass[] = "Beetroot18";
 
-};
-
-int raw_feature_get_data(size_t offset, size_t length, float *out_ptr)
-{
-  memcpy(out_ptr, features + offset, length * sizeof(float));
-  return 0;
+/* Private variables ------------------------------------------------------- */
+static bool debug_nn = false; // Set this to true to see e.g. features generated from the raw signal
+ 
+const float conversion_factor = 3.3f / (1 << 12);
+ 
+ 
+float readAxisAccelation (int adc_n) {
+    adc_select_input(adc_n);
+    unsigned int axis_raw = 0;
+    for (int i=0;i<NSAMP;i++){
+        axis_raw = axis_raw + adc_read();
+        sleep_ms(1);
+    }
+    axis_raw = axis_raw/NSAMP;
+    float axis_g = (axis_raw*conversion_factor)-G0;
+    return axis_g;
 }
-
+ 
 int main()
 {
-  stdio_usb_init();
-
-  gpio_init(LED_PIN);
-  gpio_set_dir(LED_PIN, GPIO_OUT);
-
-  ei_impulse_result_t result = {nullptr};
-
-  while (true)
-  {
-    ei_printf("Edge Impulse standalone inferencing (Raspberry Pi Pico)\n");
-
-    if (sizeof(features) / sizeof(float) != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)
-    {
-      ei_printf("The size of your 'features' array is not correct. Expected %d items, but had %u\n",
-                EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, sizeof(features) / sizeof(float));
-      return 1;
-    }
-
-    while (1)
-    {
-      // blink LED
-      gpio_put(LED_PIN, !gpio_get(LED_PIN));
-
-      // the features are stored into flash, and we don't want to load everything into RAM
-      signal_t features_signal;
-      features_signal.total_length = sizeof(features) / sizeof(features[0]);
-      features_signal.get_data = &raw_feature_get_data;
-
-      // invoke the impulse
-      EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, false);
-
-      ei_printf("run_classifier returned: %d\n", res);
-
-      if (res != 0)
+    stdio_init_all();
+    
+    if (cyw43_arch_init_with_country(CYW43_COUNTRY_UK)) {
+        printf("failed to initialise\n");
         return 1;
-
-      ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
-                result.timing.dsp, result.timing.classification, result.timing.anomaly);
-
-      // print the predictions
-      ei_printf("[");
-      for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
-      {
-        ei_printf("%.5f", result.classification[ix].value);
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-        ei_printf(", ");
-#else
-        if (ix != EI_CLASSIFIER_LABEL_COUNT - 1)
-        {
-          ei_printf(", ");
-        }
-#endif
-      }
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-      printf("%.3f", result.anomaly);
-#endif
-      printf("]\n");
-
-      ei_sleep(2000);
     }
-  }
+
+    printf("initialised\n");
+
+    cyw43_arch_enable_sta_mode();
+    if (cyw43_arch_wifi_connect_timeout_ms(ssid, pass, CYW43_AUTH_WPA2_AES_PSK, 10000)) {
+        printf("failed to connect\n");
+        return 1;
+    }
+
+    printf("connected\n");
+
+
+    adc_init();
+    adc_gpio_init(28);
+    
+    ei_printf("EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE: %.3f\n", EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
+    ei_printf("EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME: %.3f\n", EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME);
+
+    while (true){
+         
+        ei_printf("\nStarting inferencing in 2 seconds...\n");
+        sleep_ms(2000);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        ei_printf("Sampling...\n");
+
+        // Allocate a buffer here for the values we'll read from the IMU
+        float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
+
+        for (size_t ix = 0; ix < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; ix += EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME) {
+            // Determine the next tick (and then sleep later)
+
+            uint64_t next_tick = ei_read_timer_us() + (EI_CLASSIFIER_INTERVAL_MS * 1000);
+            //ei_printf("Loop: %.3f\n", next_tick - ei_read_timer_us());
+
+            buffer[ix] = readAxisAccelation (2);
+            buffer[ix + 1] = readAxisAccelation (2);
+            buffer[ix + 2] = readAxisAccelation (2);
+ 
+            buffer[ix + 0] *= CONVERT_G_TO_MS2;
+            buffer[ix + 1] *= CONVERT_G_TO_MS2 * 0.2;
+            buffer[ix + 2] *= CONVERT_G_TO_MS2 * 0.5;
+
+ 
+            //sleep_us(next_tick - ei_read_timer_us());
+        }
+ 
+        // Turn the raw buffer in a signal which we can the classify
+        signal_t signal;
+        int err = numpy::signal_from_buffer(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+        if (err != 0) {
+            ei_printf("Failed to create signal from buffer (%d)\n", err);
+            return 1;
+        }
+
+        // Run the classifier
+        ei_impulse_result_t result = { 0 };
+ 
+        err = run_classifier(&signal, &result, debug_nn);
+        if (err != EI_IMPULSE_OK) {
+            ei_printf("ERR: Failed to run classifier (%d)\n", err);
+            return 1;
+        }
+ 
+        // print the predictions
+        ei_printf("Predictions ");
+
+        ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.)",
+            result.timing.dsp, result.timing.classification, result.timing.anomaly);
+        ei_printf(": \n");
+        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+            ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
+        }
+
+        #if EI_CLASSIFIER_HAS_ANOMALY == 1
+            ei_printf("    anomaly score: %.3f\n", result.anomaly);
+        #endif
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+
+        //sleep_ms(INTERVAL_MS);
+    }
+
+
+return 0;
 }
