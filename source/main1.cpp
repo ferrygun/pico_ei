@@ -84,12 +84,18 @@ int main(void) {
         }
     }
 
+    if (sizeof(features) / sizeof(float) != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)
+    {
+      ei_printf("The size of your 'features' array is not correct. Expected %d items, but had %u\n",
+                EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, sizeof(features) / sizeof(float));
+      return 1;
+    }
+    
     while (1) {
         // wait for new samples
         while (samples_read == 0) {
             tight_loop_contents();
         }
-
 
         // store and clear the samples read from the callback
         int sample_count = samples_read;
@@ -99,7 +105,6 @@ int main(void) {
         for (int i = 0; i < sample_count; i++) {
             features[i] = sample_buffer[i];
         }
-
 
         // the features are stored into flash, and we don't want to load everything into RAM
         signal_t features_signal;
